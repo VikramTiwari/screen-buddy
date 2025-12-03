@@ -44,6 +44,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+        
+
     }
     
     @objc func statusBarButtonClicked(_ sender: NSStatusBarButton) {
