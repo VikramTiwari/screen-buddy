@@ -57,15 +57,33 @@ class ScreenRecorder: ObservableObject {
             config.width = Int(window.frame.width)
             config.height = Int(window.frame.height)
         } else if let rect = selectionRect {
-            filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
-            config.sourceRect = rect
+            // Find the display that contains the selection
+            let displays = availableContent?.displays ?? []
+            let center = CGPoint(x: rect.midX, y: rect.midY)
+            let bestDisplay = displays.first { $0.frame.contains(center) } ?? display
+            
+            filter = SCContentFilter(display: bestDisplay, excludingApplications: [], exceptingWindows: [])
+            
+            // Convert global rect to display-relative rect
+            // SCStreamConfiguration.sourceRect is relative to the display's origin
+            let relativeRect = rect.offsetBy(dx: -bestDisplay.frame.origin.x, dy: -bestDisplay.frame.origin.y)
+            config.sourceRect = relativeRect
+            
             config.width = Int(rect.width)
             config.height = Int(rect.height)
+            
+            // Scale up for Retina if possible? For now, just ensure even dimensions.
+            // Ideally we'd multiply by bestDisplay.scale (if available) or similar.
+            // But let's stick to 1:1 points-to-pixels for stability first.
         } else {
             filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
             config.width = Int(display.width)
             config.height = Int(display.height)
         }
+        
+        // Ensure dimensions are even (required by some encoders)
+        if config.width % 2 != 0 { config.width += 1 }
+        if config.height % 2 != 0 { config.height += 1 }
         
         config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         config.queueDepth = 5
