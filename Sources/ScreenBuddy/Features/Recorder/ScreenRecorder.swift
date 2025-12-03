@@ -96,7 +96,7 @@ class ScreenRecorder: ObservableObject {
             let stream = SCStream(filter: filter, configuration: config, delegate: nil)
             
             print("ScreenRecorder: Adding stream output...")
-            try await stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: recorderQueue)
+            try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: recorderQueue)
             print("ScreenRecorder: Stream output added")
             
             self.stream = stream
@@ -232,7 +232,17 @@ class StreamOutput: NSObject, SCStreamOutput {
             return
         }
         
+        guard CMSampleBufferGetImageBuffer(sampleBuffer) != nil else {
+            print("StreamOutput: Dropped frame, no image buffer")
+            return
+        }
+        
         let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        
+        if let lastTime = lastSampleTime, timestamp <= lastTime {
+            print("StreamOutput: Dropped frame, non-monotonic timestamp (last: \(lastTime.seconds), curr: \(timestamp.seconds))")
+            return
+        }
         
         if !sessionStarted {
             sessionStarted = true

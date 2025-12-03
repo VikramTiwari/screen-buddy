@@ -26,7 +26,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "record.circle", accessibilityDescription: "Record")
+            let config = NSImage.SymbolConfiguration(paletteColors: [.white])
+            button.image = NSImage(systemSymbolName: "record.circle", accessibilityDescription: "Record")?.withSymbolConfiguration(config)
             button.action = #selector(statusBarButtonClicked(_:))
             button.target = self
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -37,12 +38,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             for await isRecording in recorder.$isRecording.values {
                 if let button = statusItem.button {
                     let imageName = isRecording ? "record.circle.fill" : "record.circle"
-                    button.image = NSImage(systemSymbolName: imageName, accessibilityDescription: isRecording ? "Stop Recording" : "Start Recording")
-                    if isRecording {
-                        button.contentTintColor = .red
-                    } else {
-                        button.contentTintColor = .labelColor
-                    }
+                    let color: NSColor = isRecording ? .red : .white
+                    let config = NSImage.SymbolConfiguration(paletteColors: [color])
+                    button.image = NSImage(systemSymbolName: imageName, accessibilityDescription: isRecording ? "Stop Recording" : "Start Recording")?.withSymbolConfiguration(config)
                 }
             }
         }
