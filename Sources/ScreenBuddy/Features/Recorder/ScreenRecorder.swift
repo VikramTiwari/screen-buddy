@@ -1,10 +1,13 @@
 import Foundation
 import ScreenCaptureKit
 import AVFoundation
+import VideoToolbox
 import SwiftUI
 
 @MainActor
 class ScreenRecorder: ObservableObject {
+    static let shared = ScreenRecorder()
+    
     @Published var isRecording = false
     @Published var availableContent: SCShareableContent?
     @Published var selectedDisplay: SCDisplay?
@@ -12,6 +15,7 @@ class ScreenRecorder: ObservableObject {
     
     private var stream: SCStream?
     private var videoOutput: StreamOutput?
+    private let recorderQueue = DispatchQueue(label: "com.screenbuddy.recorder")
     
     private let cameraRecorder = CameraRecorder()
     private let audioRecorder = AudioRecorder()
@@ -26,16 +30,43 @@ class ScreenRecorder: ObservableObject {
         }
     }
     
+    @Published var selectionRect: CGRect?
+    @Published var selectedWindow: SCWindow?
+    
+    func setSelection(rect: CGRect?) {
+        self.selectionRect = rect
+        self.selectedWindow = nil
+    }
+    
+    func setSelection(window: SCWindow?) {
+        self.selectedWindow = window
+        self.selectionRect = nil
+    }
+    
     func startRecording() async {
         guard let display = selectedDisplay else {
             self.error = "No display selected"
             return
         }
         
-        let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+        let filter: SCContentFilter
         let config = SCStreamConfiguration()
-        config.width = Int(display.width)
-        config.height = Int(display.height)
+        
+        if let window = selectedWindow {
+            filter = SCContentFilter(desktopIndependentWindow: window)
+            config.width = Int(window.frame.width)
+            config.height = Int(window.frame.height)
+        } else if let rect = selectionRect {
+            filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+            config.sourceRect = rect
+            config.width = Int(rect.width)
+            config.height = Int(rect.height)
+        } else {
+            filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+            config.width = Int(display.width)
+            config.height = Int(display.height)
+        }
+        
         config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         config.queueDepth = 5
         
@@ -52,13 +83,36 @@ class ScreenRecorder: ObservableObject {
             let interactionsURL = sessionFolderURL.appendingPathComponent("interactions.json")
             
             // Start Screen Recording
-            let output = try StreamOutput(url: screenURL, width: config.width, height: config.height)
+            print("ScreenRecorder: Starting capture with config: width=\(config.width), height=\(config.height), rect=\(config.sourceRect)")
+            if let window = selectedWindow {
+                print("ScreenRecorder: Selected window: \(window.owningApplication?.applicationName ?? "Unknown") (\(window.windowID))")
+            } else if let rect = selectionRect {
+                print("ScreenRecorder: Selected rect: \(rect)")
+            } else {
+                print("ScreenRecorder: Full screen (Display: \(display.displayID))")
+            }
+            
+            let output = try StreamOutput(url: screenURL, width: config.width, height: config.height, queue: recorderQueue)
             let stream = SCStream(filter: filter, configuration: config, delegate: nil)
-            try await stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: DispatchQueue(label: "com.screenbuddy.recorder"))
-            try await stream.startCapture()
+            
+            print("ScreenRecorder: Adding stream output...")
+            try await stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: recorderQueue)
+            print("ScreenRecorder: Stream output added")
             
             self.stream = stream
             self.videoOutput = output
+            
+            print("ScreenRecorder: Starting capture...")
+            try await stream.startCapture()
+            print("ScreenRecorder: Capture started")
+            
+            // Check if we were stopped while starting
+            guard self.stream != nil else {
+                print("ScreenRecorder: Stopped while starting, cleaning up...")
+                try? await stream.stopCapture()
+                await output.finish()
+                return
+            }
             
             // Start Camera Recording
             try await cameraRecorder.startRecording(to: cameraURL)
@@ -73,6 +127,7 @@ class ScreenRecorder: ObservableObject {
             print("Recording started to \(sessionFolderURL.path)")
         } catch {
             self.error = "Failed to start recording: \(error.localizedDescription)"
+            print("ScreenRecorder: Error starting recording: \(error)")
             // Cleanup if possible
             await stopRecording()
         }
@@ -80,8 +135,11 @@ class ScreenRecorder: ObservableObject {
     
     func stopRecording() async {
         do {
+            print("ScreenRecorder: Stopping recording...")
             try await stream?.stopCapture()
+            print("ScreenRecorder: Stream capture stopped")
             await videoOutput?.finish()
+            print("ScreenRecorder: Video output finished")
             
             await cameraRecorder.stopRecording()
             await audioRecorder.stopRecording()
@@ -93,6 +151,7 @@ class ScreenRecorder: ObservableObject {
             print("Recording stopped")
         } catch {
             self.error = "Failed to stop recording: \(error.localizedDescription)"
+            print("ScreenRecorder: Error stopping recording: \(error)")
         }
     }
 }
@@ -102,14 +161,23 @@ class StreamOutput: NSObject, SCStreamOutput {
     private var videoInput: AVAssetWriterInput
     private var isWriting = false
     private var sessionStarted = false
+    private var frameCount = 0
+    private var lastSampleTime: CMTime?
+    private let queue: DispatchQueue
     
-    init(url: URL, width: Int, height: Int) throws {
+    init(url: URL, width: Int, height: Int, queue: DispatchQueue) throws {
+        self.queue = queue
         self.assetWriter = try AVAssetWriter(outputURL: url, fileType: .mov)
         
         let settings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoCodecKey: AVVideoCodecType.hevc,
             AVVideoWidthKey: width,
-            AVVideoHeightKey: height
+            AVVideoHeightKey: height,
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: width * height * 2, // High bitrate calculation
+                AVVideoProfileLevelKey: kVTProfileLevel_HEVC_Main_AutoLevel,
+                AVVideoExpectedSourceFrameRateKey: 60
+            ]
         ]
         
         self.videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
@@ -123,28 +191,64 @@ class StreamOutput: NSObject, SCStreamOutput {
         
         if self.assetWriter.startWriting() {
             self.isWriting = true
+            print("StreamOutput: AssetWriter started writing to \(url.path)")
         } else {
              throw self.assetWriter.error ?? NSError(domain: "ScreenBuddy", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to start writing"])
         }
     }
     
     func finish() async {
-        guard isWriting else { return }
-        isWriting = false
+        // Synchronize with the sample handler queue to ensure no more samples are being processed
+        let (finalTime, wasStarted) = queue.sync {
+            let time = self.lastSampleTime
+            let started = self.sessionStarted
+            self.isWriting = false // Prevent further writing
+            return (time, started)
+        }
+        
+        if let lastTime = finalTime, wasStarted {
+            if lastTime.isValid {
+                assetWriter.endSession(atSourceTime: lastTime)
+                print("StreamOutput: Ended session at \(lastTime)")
+            } else {
+                print("StreamOutput: WARNING - Last sample time is invalid, skipping endSession")
+            }
+        }
+        
         videoInput.markAsFinished()
         await assetWriter.finishWriting()
+        print("StreamOutput: AssetWriter finished writing. Status: \(assetWriter.status.rawValue), Error: \(String(describing: assetWriter.error))")
+        print("StreamOutput: Total frames written: \(frameCount)")
+        if !wasStarted {
+            print("StreamOutput: WARNING - Session never started (no frames received)")
+        }
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, isWriting else { return }
+        guard type == .screen else { return }
+        
+        // This runs on 'queue'
+        if !isWriting {
+            return
+        }
+        
+        let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         
         if !sessionStarted {
             sessionStarted = true
-            assetWriter.startSession(atSourceTime: CMSampleBufferGetPresentationTimeStamp(sampleBuffer))
+            assetWriter.startSession(atSourceTime: timestamp)
+            print("StreamOutput: Session started at \(timestamp)")
         }
         
         if videoInput.isReadyForMoreMediaData {
-            videoInput.append(sampleBuffer)
+            if videoInput.append(sampleBuffer) {
+                lastSampleTime = timestamp
+                frameCount += 1
+            } else {
+                print("StreamOutput: Failed to append frame. Error: \(String(describing: assetWriter.error))")
+            }
+        } else {
+            print("StreamOutput: Dropped frame, input not ready")
         }
     }
 }

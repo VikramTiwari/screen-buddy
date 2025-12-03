@@ -8,28 +8,50 @@ class CameraRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
     
     func startRecording(to url: URL) async throws {
         let session = AVCaptureSession()
-        session.sessionPreset = .high
         
         guard let device = AVCaptureDevice.default(for: .video),
               let input = try? AVCaptureDeviceInput(device: device) else {
-            throw NSError(domain: "CameraRecorder", code: -1, userInfo: [NSLocalizedDescriptionKey: "No camera found"])
+            print("CameraRecorder: No camera found")
+            return // Don't crash if no camera
         }
         
         if session.canAddInput(input) {
             session.addInput(input)
+        } else {
+            print("CameraRecorder: Could not add input")
+            return
+        }
+        
+        // Set preset AFTER adding input to ensure compatibility
+        if session.canSetSessionPreset(.hd4K3840x2160) {
+            session.sessionPreset = .hd4K3840x2160
+        } else {
+            session.sessionPreset = .high
         }
         
         let output = AVCaptureMovieFileOutput()
         if session.canAddOutput(output) {
             session.addOutput(output)
+        } else {
+            print("CameraRecorder: Could not add output")
+            return
         }
         
         self.session = session
         self.output = output
         
+        // Start running session first
         DispatchQueue.global(qos: .userInitiated).async {
             session.startRunning()
-            output.startRecording(to: url, recordingDelegate: self)
+            
+            // Wait a bit for connections to be active
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                if output.connections.first?.isActive == true {
+                    output.startRecording(to: url, recordingDelegate: self)
+                } else {
+                    print("CameraRecorder: Output connection not active")
+                }
+            }
         }
         
         self.isRecording = true
