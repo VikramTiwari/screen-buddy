@@ -110,8 +110,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             
             let window = NSWindow(contentViewController: hostingController)
             window.styleMask = [.borderless, .fullSizeContentView]
-            window.level = .screenSaver
-            window.backgroundColor = .clear
+            window.level = NSWindow.Level.screenSaver
+            window.backgroundColor = NSColor.clear
             window.isOpaque = false
             window.hasShadow = false
             window.ignoresMouseEvents = false

@@ -73,7 +73,11 @@ class ScreenRecorder: ObservableObject {
         do {
             let desktopURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first!
             let baseFolderURL = desktopURL.appendingPathComponent("screen-buddy")
-            let sessionFolderURL = baseFolderURL.appendingPathComponent("session-\(Date().timeIntervalSince1970)")
+            
+            let dateFormatter = DateFormatter()
+            dateFormatter.dateFormat = "yyyy-MM-dd 'at' HH.mm.ss"
+            let folderName = "Recording \(dateFormatter.string(from: Date()))"
+            let sessionFolderURL = baseFolderURL.appendingPathComponent(folderName)
             
             try FileManager.default.createDirectory(at: sessionFolderURL, withIntermediateDirectories: true)
             
@@ -83,32 +87,18 @@ class ScreenRecorder: ObservableObject {
             let interactionsURL = sessionFolderURL.appendingPathComponent("interactions.json")
             
             // Start Screen Recording
-            print("ScreenRecorder: Starting capture with config: width=\(config.width), height=\(config.height), rect=\(config.sourceRect)")
-            if let window = selectedWindow {
-                print("ScreenRecorder: Selected window: \(window.owningApplication?.applicationName ?? "Unknown") (\(window.windowID))")
-            } else if let rect = selectionRect {
-                print("ScreenRecorder: Selected rect: \(rect)")
-            } else {
-                print("ScreenRecorder: Full screen (Display: \(display.displayID))")
-            }
-            
             let output = try StreamOutput(url: screenURL, width: config.width, height: config.height, queue: recorderQueue)
             let stream = SCStream(filter: filter, configuration: config, delegate: nil)
             
-            print("ScreenRecorder: Adding stream output...")
             try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: recorderQueue)
-            print("ScreenRecorder: Stream output added")
             
             self.stream = stream
             self.videoOutput = output
             
-            print("ScreenRecorder: Starting capture...")
             try await stream.startCapture()
-            print("ScreenRecorder: Capture started")
             
             // Check if we were stopped while starting
             guard self.stream != nil else {
-                print("ScreenRecorder: Stopped while starting, cleaning up...")
                 try? await stream.stopCapture()
                 await output.finish()
                 return
@@ -124,7 +114,6 @@ class ScreenRecorder: ObservableObject {
             interactionRecorder.startRecording(to: interactionsURL)
             
             self.isRecording = true
-            print("Recording started to \(sessionFolderURL.path)")
         } catch {
             self.error = "Failed to start recording: \(error.localizedDescription)"
             print("ScreenRecorder: Error starting recording: \(error)")
@@ -135,11 +124,8 @@ class ScreenRecorder: ObservableObject {
     
     func stopRecording() async {
         do {
-            print("ScreenRecorder: Stopping recording...")
             try await stream?.stopCapture()
-            print("ScreenRecorder: Stream capture stopped")
             await videoOutput?.finish()
-            print("ScreenRecorder: Video output finished")
             
             await cameraRecorder.stopRecording()
             await audioRecorder.stopRecording()
@@ -148,7 +134,6 @@ class ScreenRecorder: ObservableObject {
             self.isRecording = false
             self.stream = nil
             self.videoOutput = nil
-            print("Recording stopped")
         } catch {
             self.error = "Failed to stop recording: \(error.localizedDescription)"
             print("ScreenRecorder: Error stopping recording: \(error)")
@@ -191,7 +176,6 @@ class StreamOutput: NSObject, SCStreamOutput {
         
         if self.assetWriter.startWriting() {
             self.isWriting = true
-            print("StreamOutput: AssetWriter started writing to \(url.path)")
         } else {
              throw self.assetWriter.error ?? NSError(domain: "ScreenBuddy", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to start writing"])
         }
@@ -209,7 +193,6 @@ class StreamOutput: NSObject, SCStreamOutput {
         if let lastTime = finalTime, wasStarted {
             if lastTime.isValid {
                 assetWriter.endSession(atSourceTime: lastTime)
-                print("StreamOutput: Ended session at \(lastTime)")
             } else {
                 print("StreamOutput: WARNING - Last sample time is invalid, skipping endSession")
             }
@@ -217,11 +200,6 @@ class StreamOutput: NSObject, SCStreamOutput {
         
         videoInput.markAsFinished()
         await assetWriter.finishWriting()
-        print("StreamOutput: AssetWriter finished writing. Status: \(assetWriter.status.rawValue), Error: \(String(describing: assetWriter.error))")
-        print("StreamOutput: Total frames written: \(frameCount)")
-        if !wasStarted {
-            print("StreamOutput: WARNING - Session never started (no frames received)")
-        }
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
@@ -247,7 +225,6 @@ class StreamOutput: NSObject, SCStreamOutput {
         if !sessionStarted {
             sessionStarted = true
             assetWriter.startSession(atSourceTime: timestamp)
-            print("StreamOutput: Session started at \(timestamp)")
         }
         
         if videoInput.isReadyForMoreMediaData {
