@@ -1,0 +1,14 @@
+# Swift/Xcode
+.build/
+.swiftpm/
+*.xcodeproj
+*.xcworkspace
+DerivedData/
+.DS_Store
+UserInterfaceState.xcuserstate
+Breakpoints_v2.xcbkptlist
+xcuserdata/
+
+# Editor
+.vscode/
+.idea/
