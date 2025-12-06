@@ -55,10 +55,27 @@ struct SelectionOverlayView: View {
                                 let startGlobal = localToGlobal(value.startLocation)
                                 let currentGlobal = localToGlobal(value.location)
                                 
-                                state.selectionRect = CGRect(x: min(startGlobal.x, currentGlobal.x),
-                                                             y: min(startGlobal.y, currentGlobal.y),
-                                                             width: abs(currentGlobal.x - startGlobal.x),
-                                                             height: abs(currentGlobal.y - startGlobal.y))
+                                let dx = currentGlobal.x - startGlobal.x
+                                let dy = currentGlobal.y - startGlobal.y
+                                
+                                let aspectRatio: CGFloat = 16.0 / 9.0
+                                var width: CGFloat
+                                var height: CGFloat
+                                
+                                if abs(dx) / aspectRatio > abs(dy) {
+                                    // Width is dominant
+                                    width = abs(dx)
+                                    height = width / aspectRatio
+                                } else {
+                                    // Height is dominant
+                                    height = abs(dy)
+                                    width = height * aspectRatio
+                                }
+                                
+                                let originX = dx > 0 ? startGlobal.x : startGlobal.x - width
+                                let originY = dy > 0 ? startGlobal.y : startGlobal.y - height
+                                
+                                state.selectionRect = CGRect(x: originX, y: originY, width: width, height: height)
                             }
                             .onEnded { _ in
                                 state.isDragging = false

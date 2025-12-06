@@ -3,6 +3,7 @@ import ScreenCaptureKit
 import AVFoundation
 import VideoToolbox
 import SwiftUI
+import AppKit
 
 @MainActor
 class ScreenRecorder: ObservableObject {
@@ -15,15 +16,17 @@ class ScreenRecorder: ObservableObject {
     
     private var stream: SCStream?
     private var videoOutput: StreamOutput?
+    private var audioOutput: SystemAudioStreamOutput?
     private let recorderQueue = DispatchQueue(label: "com.screenbuddy.recorder")
     
     private let cameraRecorder = CameraRecorder()
     private let audioRecorder = AudioRecorder()
     private let interactionRecorder = InteractionRecorder()
+    private var currentRecordingFolder: URL?
     
     func loadAvailableContent() async {
         do {
-            availableContent = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            availableContent = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
             selectedDisplay = availableContent?.displays.first
         } catch {
             self.error = "Failed to load content: \(error.localizedDescription)"
@@ -62,7 +65,19 @@ class ScreenRecorder: ObservableObject {
             let center = CGPoint(x: rect.midX, y: rect.midY)
             let bestDisplay = displays.first { $0.frame.contains(center) } ?? display
             
-            filter = SCContentFilter(display: bestDisplay, excludingApplications: [], exceptingWindows: [])
+            // Exclude ScreenBuddy app
+            // We need to fetch fresh content or ensure we have the app. 
+            // availableContent might be stale or missing the app if it had no windows.
+            let currentBundleID = Bundle.main.bundleIdentifier
+            var excludedApps: [SCRunningApplication] = []
+            do {
+                let contentForExclusion = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+                excludedApps = contentForExclusion.applications.filter { $0.bundleIdentifier == currentBundleID }
+            } catch {
+                print("Failed to fetch content for exclusion: \(error)")
+            }
+            
+            filter = SCContentFilter(display: bestDisplay, excludingApplications: excludedApps, exceptingWindows: [])
             
             // Convert global rect to display-relative rect
             // SCStreamConfiguration.sourceRect is relative to the display's origin
@@ -76,7 +91,17 @@ class ScreenRecorder: ObservableObject {
             // Ideally we'd multiply by bestDisplay.scale (if available) or similar.
             // But let's stick to 1:1 points-to-pixels for stability first.
         } else {
-            filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+            // Exclude ScreenBuddy app
+            let currentBundleID = Bundle.main.bundleIdentifier
+            var excludedApps: [SCRunningApplication] = []
+            do {
+                let contentForExclusion = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+                excludedApps = contentForExclusion.applications.filter { $0.bundleIdentifier == currentBundleID }
+            } catch {
+                print("Failed to fetch content for exclusion: \(error)")
+            }
+            
+            filter = SCContentFilter(display: display, excludingApplications: excludedApps, exceptingWindows: [])
             config.width = Int(display.width)
             config.height = Int(display.height)
         }
@@ -87,6 +112,8 @@ class ScreenRecorder: ObservableObject {
         
         config.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         config.queueDepth = 5
+        config.capturesAudio = true
+        config.excludesCurrentProcessAudio = true
         
         do {
             let desktopURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first!
@@ -98,20 +125,26 @@ class ScreenRecorder: ObservableObject {
             let sessionFolderURL = baseFolderURL.appendingPathComponent(folderName)
             
             try FileManager.default.createDirectory(at: sessionFolderURL, withIntermediateDirectories: true)
+            self.currentRecordingFolder = sessionFolderURL
             
             let screenURL = sessionFolderURL.appendingPathComponent("screen.mov")
             let cameraURL = sessionFolderURL.appendingPathComponent("camera.mov")
             let audioURL = sessionFolderURL.appendingPathComponent("mic.m4a")
             let interactionsURL = sessionFolderURL.appendingPathComponent("interactions.json")
+            let systemAudioURL = sessionFolderURL.appendingPathComponent("system.m4a")
             
             // Start Screen Recording
             let output = try StreamOutput(url: screenURL, width: config.width, height: config.height, queue: recorderQueue)
+            let audioOutput = try SystemAudioStreamOutput(url: systemAudioURL, queue: recorderQueue)
+            
             let stream = SCStream(filter: filter, configuration: config, delegate: nil)
             
             try stream.addStreamOutput(output, type: .screen, sampleHandlerQueue: recorderQueue)
+            try stream.addStreamOutput(audioOutput, type: .audio, sampleHandlerQueue: recorderQueue)
             
             self.stream = stream
             self.videoOutput = output
+            self.audioOutput = audioOutput
             
             try await stream.startCapture()
             
@@ -144,6 +177,7 @@ class ScreenRecorder: ObservableObject {
         do {
             try await stream?.stopCapture()
             await videoOutput?.finish()
+            await audioOutput?.finish()
             
             await cameraRecorder.stopRecording()
             await audioRecorder.stopRecording()
@@ -152,6 +186,13 @@ class ScreenRecorder: ObservableObject {
             self.isRecording = false
             self.stream = nil
             self.videoOutput = nil
+            self.audioOutput = nil
+            
+            // Open the folder
+            if let folderURL = self.currentRecordingFolder {
+                NSWorkspace.shared.open(folderURL)
+                self.currentRecordingFolder = nil
+            }
         } catch {
             self.error = "Failed to stop recording: \(error.localizedDescription)"
             print("ScreenRecorder: Error stopping recording: \(error)")
@@ -229,7 +270,7 @@ class StreamOutput: NSObject, SCStreamOutput {
         }
         
         guard CMSampleBufferGetImageBuffer(sampleBuffer) != nil else {
-            print("StreamOutput: Dropped frame, no image buffer")
+            // print("StreamOutput: Dropped frame, no image buffer")
             return
         }
         
@@ -254,6 +295,67 @@ class StreamOutput: NSObject, SCStreamOutput {
             }
         } else {
             print("StreamOutput: Dropped frame, input not ready")
+        }
+    }
+}
+
+class SystemAudioStreamOutput: NSObject, SCStreamOutput {
+    private var assetWriter: AVAssetWriter
+    private var audioInput: AVAssetWriterInput
+    private var isWriting = false
+    private var sessionStarted = false
+    private let queue: DispatchQueue
+    
+    init(url: URL, queue: DispatchQueue) throws {
+        self.queue = queue
+        self.assetWriter = try AVAssetWriter(outputURL: url, fileType: .m4a)
+        
+        let audioSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: 44100,
+            AVNumberOfChannelsKey: 2,
+            AVEncoderBitRateKey: 128000
+        ]
+        
+        self.audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+        self.audioInput.expectsMediaDataInRealTime = true
+        
+        if self.assetWriter.canAdd(self.audioInput) {
+            self.assetWriter.add(self.audioInput)
+        } else {
+            throw NSError(domain: "ScreenBuddy", code: -1, userInfo: [NSLocalizedDescriptionKey: "Cannot add audio input"])
+        }
+        
+        if self.assetWriter.startWriting() {
+            self.isWriting = true
+        } else {
+            throw self.assetWriter.error ?? NSError(domain: "ScreenBuddy", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to start writing audio"])
+        }
+    }
+    
+    func finish() async {
+        queue.sync {
+            self.isWriting = false
+        }
+        
+        audioInput.markAsFinished()
+        await assetWriter.finishWriting()
+    }
+    
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .audio else { return }
+        
+        if !isWriting { return }
+        
+        let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        
+        if !sessionStarted {
+            sessionStarted = true
+            assetWriter.startSession(atSourceTime: timestamp)
+        }
+        
+        if audioInput.isReadyForMoreMediaData {
+            audioInput.append(sampleBuffer)
         }
     }
 }

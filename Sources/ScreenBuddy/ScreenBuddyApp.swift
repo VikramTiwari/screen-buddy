@@ -26,8 +26,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         
         if let button = statusItem.button {
-            let config = NSImage.SymbolConfiguration(paletteColors: [.white])
-            button.image = NSImage(systemSymbolName: "record.circle", accessibilityDescription: "Record")?.withSymbolConfiguration(config)
+            let image = NSImage(systemSymbolName: "record.circle", accessibilityDescription: "Record")
+            image?.isTemplate = true // Allows automatic light/dark mode adaptation
+            button.image = image
             button.action = #selector(statusBarButtonClicked(_:))
             button.target = self
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -37,10 +38,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Task {
             for await isRecording in recorder.$isRecording.values {
                 if let button = statusItem.button {
-                    let imageName = isRecording ? "record.circle.fill" : "record.circle"
-                    let color: NSColor = isRecording ? .red : .white
-                    let config = NSImage.SymbolConfiguration(paletteColors: [color])
-                    button.image = NSImage(systemSymbolName: imageName, accessibilityDescription: isRecording ? "Stop Recording" : "Start Recording")?.withSymbolConfiguration(config)
+                    let image = NSImage(systemSymbolName: "record.circle", accessibilityDescription: isRecording ? "Stop Recording" : "Start Recording")
+                    
+                    if isRecording {
+                        // Red outline for recording
+                        let config = NSImage.SymbolConfiguration(paletteColors: [.red])
+                        button.image = image?.withSymbolConfiguration(config)
+                        button.image?.isTemplate = false // Keep it red
+                    } else {
+                        // Standard template for idle
+                        image?.isTemplate = true
+                        button.image = image
+                    }
+                }
+                
+                if !isRecording {
+                    self.recordingBorderWindow?.close()
+                    self.recordingBorderWindow = nil
                 }
             }
         }
@@ -86,11 +100,44 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = nil // Clear it so the next click goes to our action handler again
     }
     
+    var pickerWindow: NSWindow?
     var selectionWindows: [NSWindow] = []
+    var recordingBorderWindow: NSWindow?
     
     @objc func startRecording() {
-        // Reset state
+        // Show Content Picker
+        let pickerView = ContentPickerView(
+            recorder: recorder,
+            onSelect: { [weak self] in
+                self?.startRecordingActual()
+            },
+            onAreaSelect: { [weak self] in
+                self?.showAreaSelectionOverlay()
+            },
+            onCancel: { [weak self] in
+                self?.closePicker()
+            }
+        )
+        
+        let hostingController = NSHostingController(rootView: pickerView)
+        
+        let window = NSWindow(contentViewController: hostingController)
+        window.styleMask = [.titled, .closable, .resizable]
+        window.title = "Choose what to share"
+        window.center()
+        window.isReleasedWhenClosed = false
+        
+        // Ensure it's visible
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        
+        self.pickerWindow = window
+    }
+    
+    func showAreaSelectionOverlay() {
+        closePicker()
         selectionState.reset()
+        selectionState.mode = .area
         
         // Create a window for EACH screen
         for screen in NSScreen.screens {
@@ -133,13 +180,60 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         selectionWindows.removeAll()
     }
     
+    func closePicker() {
+        pickerWindow?.close()
+        pickerWindow = nil
+    }
+    
     func startRecordingActual() {
+        closePicker()
         closeSelectionOverlay()
+        
+        // Show border if area selection or window selection
+        if let rect = recorder.selectionRect {
+            showRecordingBorder(rect: rect)
+        } else if recorder.selectedWindow != nil {
+            // Convert window frame to global coordinates if needed, or just use the frame
+            // SCWindow frame is global (top-left origin)
+            // NSWindow needs bottom-left origin
+            // Let's just focus on Area selection for now as requested, or try to support both.
+            // The user asked "when we are recording an area", so let's prioritize that.
+            // But window recording also benefits from it.
+            
+            // For now, let's stick to explicit area selection as it's easier to map.
+            // Window tracking requires moving the border if the window moves, which is complex.
+        }
+        
         Task {
-            // Do NOT reload content here, as it resets the selection!
-            // await recorder.loadAvailableContent() 
             await recorder.startRecording()
         }
+    }
+    
+    func showRecordingBorder(rect: CGRect) {
+        let borderView = RecordingBorderView()
+        let hostingController = NSHostingController(rootView: borderView)
+        
+        let window = NSWindow(contentViewController: hostingController)
+        window.styleMask = [.borderless]
+        window.level = .floating // Above normal windows
+        window.backgroundColor = .clear
+        window.isOpaque = false
+        window.hasShadow = false
+        window.ignoresMouseEvents = true // Click-through
+        
+        // Convert SC/Global rect (top-left) to Cocoa rect (bottom-left)
+        if let screenHeight = NSScreen.screens.first?.frame.height {
+            // Expand the border slightly so it's outside the recorded area
+            let borderWidth: CGFloat = 4.0
+            let expandedRect = rect.insetBy(dx: -borderWidth, dy: -borderWidth)
+            
+            let cocoaY = screenHeight - expandedRect.origin.y - expandedRect.height
+            let cocoaRect = CGRect(x: expandedRect.origin.x, y: cocoaY, width: expandedRect.width, height: expandedRect.height)
+            window.setFrame(cocoaRect, display: true)
+        }
+        
+        window.makeKeyAndOrderFront(nil)
+        self.recordingBorderWindow = window
     }
     
     @objc func quitApp() {
